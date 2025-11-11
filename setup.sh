@@ -57,17 +57,20 @@ fi
 # Setup SSH keys for Git
 SSH_DIR="/workspace/ssh"
 SSH_KEY="$SSH_DIR/id_ed25519"
+ROOT_SSH="/root/.ssh"
 NEW_KEY_CREATED=false
 
 echo ""
 echo "=== Git SSH Key Setup ==="
 
+# Create workspace SSH directory if it doesn't exist
 if [ ! -d "$SSH_DIR" ]; then
     echo "Creating SSH directory at $SSH_DIR..."
     mkdir -p "$SSH_DIR"
     chmod 700 "$SSH_DIR"
 fi
 
+# Generate key if it doesn't exist
 if [ ! -f "$SSH_KEY" ]; then
     echo "Generating new SSH key pair..."
     ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -C "runpod-workspace"
@@ -79,32 +82,39 @@ else
     echo "SSH key already exists at $SSH_KEY"
 fi
 
-# Configure Git to use the workspace SSH key
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
+# Setup ~/.ssh directory
+mkdir -p "$ROOT_SSH"
+chmod 700 "$ROOT_SSH"
 
-# Create SSH config to use workspace key
-cat > /root/.ssh/config <<EOF
+# Symlink keys from workspace to ~/.ssh
+if [ ! -L "$ROOT_SSH/id_ed25519" ]; then
+    echo "Linking SSH keys to ~/.ssh..."
+    ln -sf "$SSH_KEY" "$ROOT_SSH/id_ed25519"
+    ln -sf "$SSH_KEY.pub" "$ROOT_SSH/id_ed25519.pub"
+fi
+
+# Create SSH config
+cat > "$ROOT_SSH/config" <<EOF
 Host github.com
     HostName github.com
-    IdentityFile $SSH_KEY
+    IdentityFile $ROOT_SSH/id_ed25519
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
 
 Host gitlab.com
     HostName gitlab.com
-    IdentityFile $SSH_KEY
+    IdentityFile $ROOT_SSH/id_ed25519
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
 
 Host bitbucket.org
     HostName bitbucket.org
-    IdentityFile $SSH_KEY
+    IdentityFile $ROOT_SSH/id_ed25519
     StrictHostKeyChecking no
     UserKnownHostsFile /dev/null
 EOF
 
-chmod 600 /root/.ssh/config
+chmod 600 "$ROOT_SSH/config"
 
 # Test if key is already registered with Git services
 test_git_access() {
@@ -165,8 +175,11 @@ if [ "$NEW_KEY_CREATED" = true ] || [ "$KEY_REGISTERED" = false ]; then
     read
 else
     echo "SSH key is already registered with a Git service"
-    echo "Public key location: $SSH_KEY.pub"
 fi
+
+echo "SSH keys available at:"
+echo "  Persistent: $SSH_KEY"
+echo "  Symlinked: $ROOT_SSH/id_ed25519"
 
 # Create global Python 3.11 venv
 VENV_PATH="/opt/venv"
