@@ -5,8 +5,9 @@ import os
 import sys
 import time
 import argparse
+import subprocess
 
-VERSION = "1.0"
+VERSION = "2.0"
 PROGRAM_NAME = os.path.basename(sys.argv[0])
 CONFIG_FILE = os.path.expanduser("~/.runpod-config")
 
@@ -23,7 +24,7 @@ def load_config():
                 key, value = line.strip().split('=', 1)
                 config[key] = value.strip('"')
     
-    # Default AUTO_SSH to true if not set
+    # Defaults
     if 'RUNPOD_AUTO_SSH' not in config:
         config['RUNPOD_AUTO_SSH'] = 'true'
     
@@ -37,7 +38,6 @@ def setup_ssh_access(pod_id):
     ssh_config = os.path.join(ssh_dir, "config")
     known_hosts = os.path.join(ssh_dir, "known_hosts")
     
-    # Ensure directories exist
     os.makedirs(runpod_dir, exist_ok=True)
     os.makedirs(ssh_dir, exist_ok=True)
     
@@ -85,40 +85,32 @@ def setup_ssh_access(pod_id):
                     config_needs_update = False
         
         if config_needs_update:
-            # Add Include at top and Host block
             existing_content = ""
             if os.path.exists(ssh_config):
                 with open(ssh_config, 'r') as f:
                     existing_content = f.read()
             
             with open(ssh_config, 'w') as f:
-                # Include must be at the top
                 if include_line.strip() not in existing_content:
                     f.write(include_line)
                 
                 f.write(existing_content)
                 
-                # Add Host block if not present
                 if "Host runpod" not in existing_content:
                     f.write(host_block)
         
         # Refresh known_hosts
-        import subprocess
-        
-        # Remove old entries
         subprocess.run(['ssh-keygen', '-R', ssh_host], 
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(['ssh-keygen', '-R', f'[{ssh_host}]:{ssh_port}'], 
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        # Scan new keys
         result = subprocess.run(
             ['ssh-keyscan', '-p', str(ssh_port), '-t', 'ed25519,rsa', ssh_host],
             capture_output=True, text=True
         )
         
         if result.returncode == 0 and result.stdout:
-            # Format as [ip]:port
             new_keys = result.stdout.replace(f"{ssh_host} ", f"[{ssh_host}]:{ssh_port} ")
             
             with open(known_hosts, 'a') as f:
@@ -134,6 +126,59 @@ def setup_ssh_access(pod_id):
     except Exception as e:
         print(f"Error setting up SSH: {e}")
         return False
+
+def check_and_run_setup(config):
+    """Check for setup script and run if present"""
+    if not config.get('RUNPOD_VOLUME_ID'):
+        return
+    
+    setup_script = config.get('RUNPOD_SETUP_SCRIPT', '').strip()
+    if not setup_script:
+        return
+    
+    print("\nChecking for setup script...")
+    
+    # Check if script exists on remote
+    result = subprocess.run(
+        ['ssh', 'runpod', 'test -f /workspace/setup.sh'],
+        capture_output=True
+    )
+    
+    if result.returncode != 0:
+        print(f"Setup script not found on remote pod")
+        print(f"Run: {PROGRAM_NAME} install {setup_script}")
+        return
+    
+    # Check if local script is newer
+    if os.path.exists(setup_script):
+        local_mtime = os.path.getmtime(setup_script)
+        remote_result = subprocess.run(
+            ['ssh', 'runpod', 'stat -c %Y /workspace/setup.sh 2>/dev/null || stat -f %m /workspace/setup.sh'],
+            capture_output=True,
+            text=True,
+            shell=True
+        )
+        
+        if remote_result.returncode == 0:
+            try:
+                remote_mtime = int(remote_result.stdout.strip())
+                if local_mtime > remote_mtime:
+                    print(f"Local setup script is newer")
+                    update = input(f"Update remote script? (y/N): ").strip().lower()
+                    if update == 'y':
+                        subprocess.run(['scp', setup_script, 'runpod:/workspace/setup.sh'])
+                        subprocess.run(['ssh', 'runpod', 'chmod +x /workspace/setup.sh'])
+                        print("Setup script updated")
+            except ValueError:
+                pass
+    
+    print("Running setup script...")
+    result = subprocess.run(['ssh', 'runpod', 'bash /workspace/setup.sh'])
+    
+    if result.returncode == 0:
+        print("Setup completed successfully")
+    else:
+        print("Setup script encountered errors")
 
 def cmd_up(args):
     """Start a GPU pod"""
@@ -170,8 +215,8 @@ def cmd_up(args):
         
         # Wait for pod to start with progress bar
         pod_id = pod['id']
-        max_wait = 300  # 5 minutes max
-        check_interval = 2  # Check every 2 seconds
+        max_wait = 300
+        check_interval = 2
         elapsed = 0
         bar_width = 40
         
@@ -179,14 +224,11 @@ def cmd_up(args):
             time.sleep(check_interval)
             elapsed += check_interval
             
-            # Check if running
             pod_status = runpod.get_pod(pod_id)
             if pod_status and pod_status.get('runtime'):
-                # Clear line and show success
                 print(f"\r{'=' * bar_width} Ready!          ")
                 break
             
-            # Draw progress bar
             progress = elapsed / max_wait
             filled = int(bar_width * progress)
             bar = '=' * filled + '-' * (bar_width - filled)
@@ -197,7 +239,6 @@ def cmd_up(args):
             print("Pod may still be starting")
             return
         
-        # Auto-configure SSH unless --no-ssh flag is set
         auto_ssh = config.get('RUNPOD_AUTO_SSH', 'true').lower() == 'true'
         
         if args.no_ssh:
@@ -205,7 +246,9 @@ def cmd_up(args):
             print(f"Run '{PROGRAM_NAME} ssh' to configure SSH access")
         elif auto_ssh:
             print("\nConfiguring SSH access...")
-            setup_ssh_access(pod_id)
+            if setup_ssh_access(pod_id):
+                time.sleep(2)
+                check_and_run_setup(config)
         else:
             print(f"\nRun '{PROGRAM_NAME} ssh' to configure SSH access")
         
@@ -213,15 +256,56 @@ def cmd_up(args):
         print(f"Error: {e}")
         sys.exit(1)
 
-def cmd_status():
+def cmd_status(args):
     """Check pod status"""
     config = load_config()
+    runpod.api_key = config['RUNPOD_API_KEY']
     
+    # If --all flag, list all pods
+    if args.all:
+        try:
+            pods = runpod.get_pods()
+            
+            if not pods:
+                print("No pods found")
+                sys.exit(0)
+            
+            print(f"Found {len(pods)} pod(s):\n")
+            
+            for pod in pods:
+                status = "Running" if pod.get('runtime') else "Stopped"
+                print(f"ID: {pod['id']}")
+                print(f"  Name: {pod['name']}")
+                print(f"  Status: {status}")
+                print(f"  GPU: {pod.get('machine', {}).get('gpuDisplayName', 'Unknown')}")
+                print(f"  Image: {pod['imageName']}")
+                
+                runtime = pod.get('runtime')
+                if runtime:
+                    ports = runtime.get('ports', [])
+                    for port in ports:
+                        if port.get('privatePort') == 22:
+                            print(f"  SSH: ssh root@{port['ip']} -p {port['publicPort']}")
+                            break
+                
+                # Mark current pod
+                if pod['id'] == config.get('RUNPOD_POD_ID'):
+                    print("  [CURRENT]")
+                
+                print()
+            
+            sys.exit(0)
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+    
+    # Otherwise show current pod
     if 'RUNPOD_POD_ID' not in config:
         print("No active pod found")
+        print(f"Use '{PROGRAM_NAME} status --all' to see all pods")
         sys.exit(0)
     
-    runpod.api_key = config['RUNPOD_API_KEY']
     pod_id = config['RUNPOD_POD_ID']
     
     try:
@@ -239,7 +323,6 @@ def cmd_status():
         if runtime:
             print("Status: Running")
             
-            # Get SSH details
             ports = runtime.get('ports', [])
             for port in ports:
                 if port.get('privatePort') == 22:
@@ -272,9 +355,8 @@ def cmd_down():
             print(f"Terminating pod {pod_id}...")
             runpod.terminate_pod(pod_id)
             
-            # Wait and verify termination with progress bar
-            max_wait = 30  # 30 seconds max
-            check_interval = 0.5  # Check every 0.5 seconds
+            max_wait = 30
+            check_interval = 0.5
             elapsed = 0
             bar_width = 40
             
@@ -282,14 +364,11 @@ def cmd_down():
                 time.sleep(check_interval)
                 elapsed += check_interval
                 
-                # Check if terminated
                 pod_status = runpod.get_pod(pod_id)
                 if not pod_status:
-                    # Clear line and show success
                     print(f"\r{'=' * bar_width} Confirmed!     ")
                     break
                 
-                # Draw progress bar
                 progress = elapsed / max_wait
                 filled = int(bar_width * progress)
                 bar = '=' * filled + '-' * (bar_width - filled)
@@ -299,7 +378,6 @@ def cmd_down():
                 print(f"\r{'=' * bar_width} Timeout         ")
                 print("Pod may still be terminating")
         
-        # Remove pod ID from config
         with open(CONFIG_FILE, 'r') as f:
             lines = f.readlines()
         
@@ -327,6 +405,215 @@ def cmd_ssh():
     
     setup_ssh_access(pod_id)
 
+def cmd_install(args):
+    """Install local setup script to remote pod"""
+    if not args.args:
+        print(f"Usage: {PROGRAM_NAME} install <local_script_path>")
+        sys.exit(1)
+    
+    config = load_config()
+    
+    if 'RUNPOD_POD_ID' not in config:
+        print(f"No active pod found. Run '{PROGRAM_NAME} up' first")
+        sys.exit(1)
+    
+    local_script = args.args[0]
+    
+    if not os.path.exists(local_script):
+        print(f"Error: {local_script} not found")
+        sys.exit(1)
+    
+    if not config.get('RUNPOD_VOLUME_ID'):
+        print("Error: No volume configured. Setup scripts require a network volume.")
+        sys.exit(1)
+    
+    print(f"Copying {local_script} to /workspace/setup.sh...")
+    
+    result = subprocess.run(
+        ['scp', local_script, 'runpod:/workspace/setup.sh'],
+        capture_output=True
+    )
+    
+    if result.returncode != 0:
+        print(f"Error copying script: {result.stderr.decode()}")
+        sys.exit(1)
+    
+    subprocess.run(['ssh', 'runpod', 'chmod +x /workspace/setup.sh'])
+    
+    print("Setup script installed successfully")
+    
+    run_now = input("Run setup script now? (y/N): ").strip().lower()
+    if run_now == 'y':
+        print("\nRunning setup script...")
+        subprocess.run(['ssh', 'runpod', 'bash /workspace/setup.sh'])
+
+def cmd_setup():
+    """Run setup.py configuration"""
+    import requests
+    
+    print(f"{PROGRAM_NAME} v{VERSION}")
+    print("RunPod CLI Setup\n")
+    
+    # Load existing config if it exists
+    config = {}
+    if os.path.exists(CONFIG_FILE):
+        print(f"Found existing configuration at {CONFIG_FILE}")
+        with open(CONFIG_FILE) as f:
+            for line in f:
+                if '=' in line and not line.startswith('#'):
+                    key, value = line.strip().split('=', 1)
+                    config[key] = value.strip('"')
+        
+        print("\nCurrent settings:")
+        print("  API Key: (hidden)")
+        print(f"  Volume ID: {config.get('RUNPOD_VOLUME_ID', '(not set)')}")
+        print(f"  GPU Type: {config.get('RUNPOD_GPU_TYPE', '(not set)')}")
+        print(f"  Docker Image: {config.get('RUNPOD_DOCKER_IMAGE', '(not set)')}")
+        print(f"  Setup Script: {config.get('RUNPOD_SETUP_SCRIPT', '(not set)')}")
+        print()
+        
+        reconfigure = input("Reconfigure? (y/N): ").strip().lower()
+        if reconfigure != 'y':
+            print("Keeping existing configuration.")
+            sys.exit(0)
+        print()
+    
+    # API Key
+    if config.get('RUNPOD_API_KEY'):
+        print("Current API Key: (hidden)")
+        api_key = input("Enter new API key (press Enter to keep current): ").strip()
+        if not api_key:
+            api_key = config['RUNPOD_API_KEY']
+    else:
+        api_key = input("Enter your RunPod API key: ").strip()
+    
+    # Fetch GPU list
+    print("\nFetching available GPU types...")
+    try:
+        response = requests.post(
+            'https://api.runpod.io/graphql',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}'
+            },
+            json={'query': 'query { gpuTypes { id displayName } }'}
+        )
+        gpu_data = response.json()
+        gpu_list = [g['id'] for g in gpu_data['data']['gpuTypes'] if 'NVIDIA' in g['id']]
+        
+        if not gpu_list:
+            print("Error: Failed to fetch GPU list. Check your API key.")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"Error fetching GPU list: {e}")
+        sys.exit(1)
+    
+    # GPU Type selection
+    while True:
+        print()
+        if config.get('RUNPOD_GPU_TYPE'):
+            print(f"Current GPU type: {config['RUNPOD_GPU_TYPE']}")
+        
+        search_term = input("Enter search term for GPU (or 'quit' to exit): ").strip()
+        
+        if search_term.lower() == 'quit':
+            print("Setup cancelled.")
+            sys.exit(1)
+        
+        if not search_term and config.get('RUNPOD_GPU_TYPE'):
+            gpu_type = config['RUNPOD_GPU_TYPE']
+            break
+        
+        matches = [g for g in gpu_list if search_term.lower() in g.lower()]
+        
+        if not matches:
+            print(f"No matches found for '{search_term}'. Try again.")
+            continue
+        
+        if len(matches) == 1:
+            gpu_type = matches[0]
+            print(f"Selected: {gpu_type}")
+            break
+        else:
+            print(f"Found {len(matches)} matches:")
+            for match in matches:
+                print(f"  {match}")
+            print("Please be more specific.")
+    
+    # Volume ID
+    if config.get('RUNPOD_VOLUME_ID'):
+        print(f"Current Volume ID: {config['RUNPOD_VOLUME_ID']}")
+        volume_id = input("Enter new Volume ID (press Enter to keep current): ").strip()
+        if not volume_id:
+            volume_id = config['RUNPOD_VOLUME_ID']
+    else:
+        volume_id = input("Enter your Network Volume ID (leave blank if you don't have one yet): ").strip()
+    
+    # Docker Image
+    while True:
+        if config.get('RUNPOD_DOCKER_IMAGE'):
+            print(f"Current Docker Image: {config['RUNPOD_DOCKER_IMAGE']}")
+        
+        print("\nSelect a container image (Python 3.11+):")
+        print("1) PyTorch 2.4.0 + Python 3.11 + CUDA 12.4")
+        print("2) PyTorch 2.2.1 + Python 3.11 + CUDA 12.1")
+        print("3) Enter custom image name")
+        
+        if config.get('RUNPOD_DOCKER_IMAGE'):
+            choice = input("Choice [1-3] (press Enter to keep current): ").strip()
+        else:
+            choice = input("Choice [1-3]: ").strip()
+        
+        if not choice and config.get('RUNPOD_DOCKER_IMAGE'):
+            docker_image = config['RUNPOD_DOCKER_IMAGE']
+            break
+        
+        if choice == '1':
+            docker_image = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
+            break
+        elif choice == '2':
+            docker_image = "runpod/pytorch:2.2.1-py3.11-cuda12.1.1-devel-ubuntu22.04"
+            break
+        elif choice == '3':
+            print("\nVisit: https://console.runpod.io/hub?tabSelected=templates")
+            custom_image = input("Enter custom image name: ").strip()
+            if custom_image:
+                docker_image = custom_image
+                break
+        else:
+            print("Invalid choice, try again.")
+    
+    # Setup script path
+    if config.get('RUNPOD_SETUP_SCRIPT'):
+        print(f"Current setup script: {config['RUNPOD_SETUP_SCRIPT']}")
+        setup_script = input("Enter path to setup script (press Enter to keep current, 'none' to disable): ").strip()
+        if setup_script.lower() == 'none':
+            setup_script = ""
+        elif not setup_script:
+            setup_script = config['RUNPOD_SETUP_SCRIPT']
+    else:
+        setup_script = input("Enter path to setup script (leave blank to skip): ").strip()
+    
+    # Save configuration
+    with open(CONFIG_FILE, 'w') as f:
+        f.write(f'RUNPOD_API_KEY="{api_key}"\n')
+        f.write(f'RUNPOD_VOLUME_ID="{volume_id}"\n')
+        f.write(f'RUNPOD_GPU_TYPE="{gpu_type}"\n')
+        f.write(f'RUNPOD_DOCKER_IMAGE="{docker_image}"\n')
+        f.write(f'RUNPOD_SETUP_SCRIPT="{setup_script}"\n')
+        f.write(f'RUNPOD_AUTO_SSH="true"\n')
+    
+    os.chmod(CONFIG_FILE, 0o600)
+    
+    print(f"\nConfiguration saved to {CONFIG_FILE}")
+    print("\nFinal configuration:")
+    print("  API Key: (hidden)")
+    print(f"  Volume ID: {volume_id if volume_id else '(not set)'}")
+    print(f"  GPU Type: {gpu_type}")
+    print(f"  Docker Image: {docker_image}")
+    print(f"  Setup Script: {setup_script if setup_script else '(not set)'}")
+
 def usage():
     """Print usage information"""
     print(f"{PROGRAM_NAME} v{VERSION} - RunPod GPU management tool")
@@ -334,19 +621,24 @@ def usage():
     print(f"Usage: {PROGRAM_NAME} <command> [options]")
     print()
     print("Commands:")
-    print("  up       Start a GPU pod")
-    print("  status   Check pod status and get SSH details")
-    print("  down     Stop/terminate the pod")
-    print("  ssh      Configure SSH access (updates ~/.ssh/config)")
+    print("  setup     Configure RunPod settings")
+    print("  up        Start a GPU pod")
+    print("  status    Check pod status and get SSH details")
+    print("  down      Stop/terminate the pod")
+    print("  ssh       Configure SSH access (updates ~/.ssh/config)")
+    print("  install   Copy local setup script to remote pod")
     print()
     print("Options:")
-    print("  --no-ssh    Don't auto-configure SSH (for 'up' command)")
+    print("  --no-ssh  Don't auto-configure SSH (for 'up' command)")
+    print("  --all     Show all pods (for 'status' command)")
     print()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RunPod GPU management tool", add_help=False)
     parser.add_argument('command', nargs='?', help='Command to run')
+    parser.add_argument('args', nargs='*', help='Additional arguments')
     parser.add_argument('--no-ssh', action='store_true', help="Don't auto-configure SSH")
+    parser.add_argument('--all', action='store_true', help="Show all pods (for status command)")
     
     args = parser.parse_args()
     
@@ -356,14 +648,18 @@ if __name__ == "__main__":
     
     command = args.command
     
-    if command == "up":
+    if command == "setup":
+        cmd_setup()
+    elif command == "up":
         cmd_up(args)
     elif command == "status":
-        cmd_status()
+        cmd_status(args)
     elif command == "down":
         cmd_down()
     elif command == "ssh":
         cmd_ssh()
+    elif command == "install":
+        cmd_install(args)
     else:
         print(f"Unknown command: {command}")
         print()
