@@ -219,6 +219,7 @@ def cmd_up(args):
         
         if config.get('RUNPOD_VOLUME_ID'):
             pod_args['network_volume_id'] = config['RUNPOD_VOLUME_ID']
+            pod_args['volume_mount_path'] = '/workspace'
         
         pod = runpod.create_pod(**pod_args)
         
