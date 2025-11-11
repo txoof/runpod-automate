@@ -32,7 +32,7 @@ fi
 # Install common tools
 echo ""
 echo "Installing common tools..."
-apt-get install -y vim curl wget git htop tmux
+apt-get install -y vim curl wget git htop tmux less
 
 # Check for custom packages
 PACKAGES_FILE="/workspace/packages.txt"
