@@ -185,8 +185,11 @@ def cmd_up(args):
     config = load_config()
     runpod.api_key = config['RUNPOD_API_KEY']
     
+    # Use --gpu override if provided, otherwise use config
+    gpu_type = args.gpu if args.gpu else config['RUNPOD_GPU_TYPE']
+    
     print("Starting RunPod instance...")
-    print(f"  GPU: {config['RUNPOD_GPU_TYPE']}")
+    print(f"  GPU: {gpu_type}")
     print(f"  Image: {config['RUNPOD_DOCKER_IMAGE']}")
     if config.get('RUNPOD_VOLUME_ID'):
         print(f"  Volume: {config['RUNPOD_VOLUME_ID']}")
@@ -196,7 +199,7 @@ def cmd_up(args):
         pod_args = {
             'name': "gpu-workspace",
             'image_name': config['RUNPOD_DOCKER_IMAGE'],
-            'gpu_type_id': config['RUNPOD_GPU_TYPE'],
+            'gpu_type_id': gpu_type,
             'container_disk_in_gb': 20,
             'ports': "8888/http,22/tcp"
         }
@@ -468,7 +471,91 @@ def cmd_down(args):
         print(f"Error: {e}")
         sys.exit(1)
 
-def cmd_ssh():
+def cmd_gpus():
+    """List available GPUs"""
+    config = load_config()
+    runpod.api_key = config['RUNPOD_API_KEY']
+    
+    try:
+        import requests
+        
+        print("Fetching GPU types...\n")
+        
+        response = requests.post(
+            'https://api.runpod.io/graphql',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {config["RUNPOD_API_KEY"]}'
+            },
+            json={'query': 'query { gpuTypes { id displayName memoryInGb lowestPrice { uninterruptablePrice } secureCloud communityCloud } }'}
+        )
+        
+        gpu_data = response.json()
+        gpus = gpu_data['data']['gpuTypes']
+        
+        # Filter to NVIDIA GPUs
+        nvidia_gpus = [g for g in gpus if 'NVIDIA' in g['id']]
+        
+        if not nvidia_gpus:
+            print("No NVIDIA GPUs found")
+            sys.exit(0)
+        
+        # Separate available (with pricing) and unavailable
+        available_gpus = [g for g in nvidia_gpus if g.get('lowestPrice')]
+        unavailable_gpus = [g for g in nvidia_gpus if not g.get('lowestPrice')]
+        
+        # Sort available by price
+        available_gpus.sort(key=lambda x: float(x['lowestPrice']['uninterruptablePrice']))
+        unavailable_gpus.sort(key=lambda x: x['id'])
+        
+        if available_gpus:
+            print("AVAILABLE NOW (can deploy immediately):")
+            print(f"{'Full Name':<45} {'Memory':<10} {'Price/Hour':<15} {'Cloud'}")
+            print("-" * 95)
+            
+            for gpu in available_gpus:
+                name = gpu['id']
+                memory = f"{gpu['memoryInGb']}GB"
+                price_per_hour = float(gpu['lowestPrice']['uninterruptablePrice'])
+                price = f"${price_per_hour:.4f}/hr"
+                
+                availability = []
+                if gpu['secureCloud']:
+                    availability.append('Secure')
+                if gpu['communityCloud']:
+                    availability.append('Community')
+                avail_str = ', '.join(availability)
+                
+                print(f"{name:<45} {memory:<10} {price:<15} {avail_str}")
+            
+            print(f"\nCurrently available: {len(available_gpus)} GPU types")
+            print("\nNote: These GPUs have on-demand capacity available right now.")
+            print("      Availability changes frequently based on demand.")
+        else:
+            print("No GPUs currently available for immediate on-demand deployment")
+            print("This is unusual - availability typically changes within minutes.")
+        
+        if unavailable_gpus:
+            print(f"\n\nCURRENTLY UNAVAILABLE (no on-demand capacity):")
+            print(f"{'Full Name':<45} {'Memory'}")
+            print("-" * 60)
+            
+            for gpu in unavailable_gpus:
+                name = gpu['id']
+                memory = f"{gpu['memoryInGb']}GB"
+                print(f"{name:<45} {memory}")
+            
+            print(f"\nCurrently unavailable: {len(unavailable_gpus)} GPU types")
+            print("These may become available later. Check back or use spot instances.")
+        
+        if config.get('RUNPOD_VOLUME_ID'):
+            print(f"\n{'='*95}")
+            print(f"Your configured volume: {config['RUNPOD_VOLUME_ID']}")
+            print("Network volumes work with all GPU types across all regions.")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
     """Configure SSH access"""
     config = load_config()
     
@@ -703,10 +790,17 @@ def usage():
     print("  down [pod]        Stop/terminate pod (current or by ID/name)")
     print("  ssh               Configure SSH access (updates ~/.ssh/config)")
     print("  install <script>  Copy local setup script to remote pod")
+    print("  gpus              List available GPUs with pricing")
     print()
     print("Options:")
-    print("  --no-ssh  Don't auto-configure SSH (for 'up' command)")
-    print("  --all     Show all pods (for 'status' command)")
+    print("  --no-ssh       Don't auto-configure SSH (for 'up' command)")
+    print("  --all          Show all pods (for 'status' command)")
+    print("  --gpu <type>   Override configured GPU type (for 'up' command)")
+    print()
+    print("Examples:")
+    print(f"  {PROGRAM_NAME} up --gpu 'NVIDIA GeForce RTX 4090'")
+    print(f"  {PROGRAM_NAME} status --all")
+    print(f"  {PROGRAM_NAME} down my-pod-name")
     print()
 
 if __name__ == "__main__":
@@ -715,6 +809,7 @@ if __name__ == "__main__":
     parser.add_argument('args', nargs='*', help='Additional arguments')
     parser.add_argument('--no-ssh', action='store_true', help="Don't auto-configure SSH")
     parser.add_argument('--all', action='store_true', help="Show all pods (for status command)")
+    parser.add_argument('--gpu', type=str, help="Override configured GPU type (for up command)")
     
     args = parser.parse_args()
     
@@ -736,6 +831,8 @@ if __name__ == "__main__":
         cmd_ssh()
     elif command == "install":
         cmd_install(args)
+    elif command == "gpus":
+        cmd_gpus()
     else:
         print(f"Unknown command: {command}")
         print()
