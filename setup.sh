@@ -86,11 +86,13 @@ fi
 mkdir -p "$ROOT_SSH"
 chmod 700 "$ROOT_SSH"
 
-# Symlink keys from workspace to ~/.ssh
-if [ ! -L "$ROOT_SSH/id_ed25519" ]; then
-    echo "Linking SSH keys to ~/.ssh..."
-    ln -sf "$SSH_KEY" "$ROOT_SSH/id_ed25519"
-    ln -sf "$SSH_KEY.pub" "$ROOT_SSH/id_ed25519.pub"
+# Copy keys from workspace to ~/.ssh (symlinks can have permission issues)
+if [ ! -f "$ROOT_SSH/id_ed25519" ] || [ -L "$ROOT_SSH/id_ed25519" ]; then
+    echo "Copying SSH keys to ~/.ssh..."
+    cp "$SSH_KEY" "$ROOT_SSH/id_ed25519"
+    cp "$SSH_KEY.pub" "$ROOT_SSH/id_ed25519.pub"
+    chmod 600 "$ROOT_SSH/id_ed25519"
+    chmod 644 "$ROOT_SSH/id_ed25519.pub"
 fi
 
 # Create SSH config
