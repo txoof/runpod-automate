@@ -335,15 +335,91 @@ def cmd_status(args):
         print(f"Error: {e}")
         sys.exit(1)
 
-def cmd_down():
+def cmd_down(args):
     """Stop/terminate pod"""
     config = load_config()
+    runpod.api_key = config['RUNPOD_API_KEY']
     
+    # If pod ID/name provided as argument
+    if args.args:
+        target = args.args[0]
+        
+        try:
+            # First try as direct pod ID
+            pod = runpod.get_pod(target)
+            
+            # If not found, search by name
+            if not pod:
+                pods = runpod.get_pods()
+                matching_pods = [p for p in pods if p['name'] == target or p['id'].startswith(target)]
+                
+                if not matching_pods:
+                    print(f"No pod found matching: {target}")
+                    sys.exit(1)
+                elif len(matching_pods) > 1:
+                    print(f"Multiple pods match '{target}':")
+                    for p in matching_pods:
+                        print(f"  {p['id']} - {p['name']}")
+                    print("\nPlease be more specific")
+                    sys.exit(1)
+                else:
+                    pod = matching_pods[0]
+            
+            pod_id = pod['id']
+            
+            print(f"Terminating pod {pod['name']} ({pod_id})...")
+            runpod.terminate_pod(pod_id)
+            
+            # Verify termination with progress bar
+            max_wait = 30
+            check_interval = 0.5
+            elapsed = 0
+            bar_width = 40
+            
+            while elapsed < max_wait:
+                time.sleep(check_interval)
+                elapsed += check_interval
+                
+                pod_status = runpod.get_pod(pod_id)
+                if not pod_status:
+                    print(f"\r{'=' * bar_width} Confirmed!     ")
+                    break
+                
+                progress = elapsed / max_wait
+                filled = int(bar_width * progress)
+                bar = '=' * filled + '-' * (bar_width - filled)
+                remaining = int(max_wait - elapsed)
+                print(f"\rVerifying [{bar}] {remaining}s ", end='', flush=True)
+            else:
+                print(f"\r{'=' * bar_width} Timeout         ")
+                print("Pod may still be terminating")
+            
+            # Remove from config if it was the current pod
+            if config.get('RUNPOD_POD_ID') == pod_id:
+                with open(CONFIG_FILE, 'r') as f:
+                    lines = f.readlines()
+                
+                with open(CONFIG_FILE, 'w') as f:
+                    for line in lines:
+                        if not line.startswith('RUNPOD_POD_ID='):
+                            f.write(line)
+                
+                print("\nPod ID removed from config")
+            else:
+                print("\nPod terminated")
+            
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        
+        return
+    
+    # Otherwise terminate current pod
     if 'RUNPOD_POD_ID' not in config:
         print("No active pod found")
+        print(f"Usage: {PROGRAM_NAME} down [pod_id_or_name]")
         sys.exit(0)
     
-    runpod.api_key = config['RUNPOD_API_KEY']
     pod_id = config['RUNPOD_POD_ID']
     
     try:
@@ -621,12 +697,12 @@ def usage():
     print(f"Usage: {PROGRAM_NAME} <command> [options]")
     print()
     print("Commands:")
-    print("  setup     Configure RunPod settings")
-    print("  up        Start a GPU pod")
-    print("  status    Check pod status and get SSH details")
-    print("  down      Stop/terminate the pod")
-    print("  ssh       Configure SSH access (updates ~/.ssh/config)")
-    print("  install   Copy local setup script to remote pod")
+    print("  setup             Configure RunPod settings")
+    print("  up                Start a GPU pod")
+    print("  status [--all]    Check pod status and get SSH details")
+    print("  down [pod]        Stop/terminate pod (current or by ID/name)")
+    print("  ssh               Configure SSH access (updates ~/.ssh/config)")
+    print("  install <script>  Copy local setup script to remote pod")
     print()
     print("Options:")
     print("  --no-ssh  Don't auto-configure SSH (for 'up' command)")
@@ -655,7 +731,7 @@ if __name__ == "__main__":
     elif command == "status":
         cmd_status(args)
     elif command == "down":
-        cmd_down()
+        cmd_down(args)
     elif command == "ssh":
         cmd_ssh()
     elif command == "install":
