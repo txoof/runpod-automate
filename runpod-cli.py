@@ -127,6 +127,19 @@ def setup_ssh_access(pod_id):
         print(f"Error setting up SSH: {e}")
         return False
 
+def cmd_ssh():
+    """Configure SSH access"""
+    config = load_config()
+    
+    if 'RUNPOD_POD_ID' not in config:
+        print(f"No active pod found. Run '{PROGRAM_NAME} up' first")
+        sys.exit(1)
+    
+    runpod.api_key = config['RUNPOD_API_KEY']
+    pod_id = config['RUNPOD_POD_ID']
+    
+    setup_ssh_access(pod_id)
+
 def check_and_run_setup(config):
     """Check for setup script and run if present"""
     if not config.get('RUNPOD_VOLUME_ID'):
