@@ -4,6 +4,23 @@ set -e
 echo "=== RunPod Setup Script ==="
 echo ""
 
+# Detect available Python 3 version
+detect_python() {
+    # Try python3.11, python3.10, python3.9, then fallback to python3
+    for py_version in python3.11 python3.10 python3.9 python3; do
+        if command -v $py_version &> /dev/null; then
+            echo "$py_version"
+            return 0
+        fi
+    done
+    echo "python3"  # fallback
+}
+
+PYTHON_CMD=$(detect_python)
+PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | awk '{print $2}')
+echo "Detected Python: $PYTHON_CMD ($PYTHON_VERSION)"
+echo ""
+
 # Check if apt cache is older than 15 days
 APT_LISTS="/var/lib/apt/lists"
 CACHE_AGE_DAYS=15
@@ -183,14 +200,14 @@ echo "SSH keys available at:"
 echo "  Persistent: $SSH_KEY"
 echo "  Symlinked: $ROOT_SSH/id_ed25519"
 
-# Create global Python 3.11 venv
+# Create global Python venv
 VENV_PATH="/opt/venv"
 
 if [ ! -d "$VENV_PATH" ]; then
     echo ""
-    echo "Creating global Python 3.11 virtual environment at $VENV_PATH..."
-    python3.11 -m venv "$VENV_PATH"
-    echo "Virtual environment created"
+    echo "Creating global Python virtual environment at $VENV_PATH..."
+    $PYTHON_CMD -m venv "$VENV_PATH"
+    echo "Virtual environment created with $PYTHON_CMD"
 else
     echo ""
     echo "Virtual environment already exists at $VENV_PATH"
@@ -222,6 +239,7 @@ pip install --upgrade pip
 
 echo ""
 echo "=== Setup Complete ==="
+echo "Python version: $PYTHON_VERSION"
 echo "Virtual environment: $VENV_PATH"
 echo "SSH key location: $SSH_KEY"
 echo "Activate venv with: source $VENV_PATH/bin/activate"
