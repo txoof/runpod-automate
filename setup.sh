@@ -232,6 +232,33 @@ fi
 # Activate venv for current session
 source "$VENV_PATH/bin/activate"
 
+# Setup CUDA environment for TensorFlow
+echo ""
+echo "Setting up CUDA environment variables..."
+
+
+CUDA_ENV_SETUP="
+# CUDA environment for TensorFlow
+export LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/cuda-11.8/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda-11.8
+export PATH=/usr/local/cuda-11.8/bin:\$PATH
+"
+
+if ! grep -q "CUDA environment for TensorFlow" "$BASHRC" 2>/dev/null; then
+    echo "$CUDA_ENV_SETUP" >> "$BASHRC"
+    echo "CUDA environment variables added to .bashrc"
+    echo ""
+    echo "=====CUDA ENV ADDED TO .bashrc======"
+    echo "$CUDA_ENV_SETUP"
+    echo "===================================="
+else
+    echo "CUDA environment already in .bashrc"
+fi
+
+# Apply CUDA settings to current session
+
+eval "$CUDA_ENV_SETUP"
+
 # Upgrade pip
 echo ""
 echo "Upgrading pip..."
