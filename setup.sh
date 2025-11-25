@@ -232,37 +232,90 @@ fi
 # Activate venv for current session
 source "$VENV_PATH/bin/activate"
 
-# Setup CUDA environment for TensorFlow
-echo ""
-echo "Setting up CUDA environment variables..."
-
-
-CUDA_ENV_SETUP="
-# CUDA environment for TensorFlow
-export LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/torch/lib:/usr/local/cuda-11.8/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH
-export CUDA_HOME=/usr/local/cuda-11.8
-export PATH=/usr/local/cuda-11.8/bin:\$PATH
-"
-
-if ! grep -q "CUDA environment for TensorFlow" "$BASHRC" 2>/dev/null; then
-    echo "$CUDA_ENV_SETUP" >> "$BASHRC"
-    echo "CUDA environment variables added to .bashrc"
-    echo ""
-    echo "=====CUDA ENV ADDED TO .bashrc======"
-    echo "$CUDA_ENV_SETUP"
-    echo "===================================="
-else
-    echo "CUDA environment already in .bashrc"
-fi
-
-# Apply CUDA settings to current session
-
-eval "$CUDA_ENV_SETUP"
-
 # Upgrade pip
 echo ""
 echo "Upgrading pip..."
 pip install --upgrade pip
+
+# Setup CUDA environment variables (agnostic)
+echo ""
+echo "=== CUDA Environment Setup ==="
+
+# Detect CUDA version
+CUDA_VERSION=""
+if [ -d /usr/local/cuda ]; then
+    CUDA_VERSION=$(readlink -f /usr/local/cuda | grep -oP 'cuda-\K[0-9.]+' || echo "")
+fi
+
+if [ -z "$CUDA_VERSION" ]; then
+    # Try finding any cuda installation
+    CUDA_DIR=$(find /usr/local -maxdepth 1 -type d -name "cuda-*" | sort -V | tail -1)
+    if [ -n "$CUDA_DIR" ]; then
+        CUDA_VERSION=$(basename "$CUDA_DIR" | grep -oP 'cuda-\K[0-9.]+')
+    fi
+fi
+
+# Detect PyTorch CUDA libraries (check common system locations)
+PYTORCH_CUDA_LIB=""
+for py_version in python3.10 python3.11 python3.9; do
+    if [ -d "/usr/local/lib/$py_version/dist-packages/torch/lib" ]; then
+        PYTORCH_CUDA_LIB="/usr/local/lib/$py_version/dist-packages/torch/lib"
+        break
+    fi
+done
+
+if [ -n "$CUDA_VERSION" ]; then
+    echo "Detected CUDA version: $CUDA_VERSION"
+    CUDA_PATH="/usr/local/cuda-$CUDA_VERSION"
+    
+    # Build LD_LIBRARY_PATH
+    LIB_PATHS="$CUDA_PATH/lib64:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
+    
+    # Add PyTorch CUDA libraries if they exist
+    if [ -n "$PYTORCH_CUDA_LIB" ] && [ -d "$PYTORCH_CUDA_LIB" ]; then
+        LIB_PATHS="$PYTORCH_CUDA_LIB:$LIB_PATHS"
+        echo "Found PyTorch CUDA libraries at: $PYTORCH_CUDA_LIB"
+    fi
+    
+    CUDA_ENV_SETUP="
+# CUDA environment (auto-detected)
+export LD_LIBRARY_PATH=$LIB_PATHS:\$LD_LIBRARY_PATH
+export CUDA_HOME=$CUDA_PATH
+export PATH=$CUDA_PATH/bin:\$PATH
+"
+    
+    # Add to bashrc if not already there
+    if ! grep -q "CUDA environment (auto-detected)" "$BASHRC" 2>/dev/null; then
+        echo "$CUDA_ENV_SETUP" >> "$BASHRC"
+        echo "✓ CUDA environment variables added to .bashrc"
+    else
+        echo "✓ CUDA environment already in .bashrc"
+    fi
+    
+    # Apply to current session
+    eval "$CUDA_ENV_SETUP"
+    
+    echo "CUDA_HOME: $CUDA_HOME"
+    echo "CUDA libraries: $LIB_PATHS"
+else
+    echo "⚠ No CUDA installation detected"
+fi
+
+# Run post-setup script if it exists
+POST_SETUP="/workspace/post-setup.sh"
+if [ -f "$POST_SETUP" ]; then
+    echo ""
+    echo "=== Running Post-Setup Script ==="
+    if [ -x "$POST_SETUP" ]; then
+        bash "$POST_SETUP"
+    else
+        echo "Warning: $POST_SETUP exists but is not executable"
+        echo "Run: chmod +x $POST_SETUP"
+    fi
+else
+    echo ""
+    echo "No post-setup script found at $POST_SETUP (optional)"
+fi
 
 echo ""
 echo "=== Setup Complete ==="
