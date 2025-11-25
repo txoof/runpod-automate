@@ -144,41 +144,101 @@ Copy local setup script to pod
 
 Copies your setup script to `/workspace/setup.sh` on the pod and optionally runs it immediately.
 
-## Setup Script
+## Setup Scripts
 
-The setup script (`setup.sh`) runs automatically when a pod starts (if configured). It handles:
+The tool supports two-stage setup automation:
+
+1. **setup.sh** - Main system setup (runs first)
+2. **post-setup.sh** - Custom project setup (runs after setup.sh, optional)
+
+### Main Setup Script (setup.sh)
+
+The main setup script runs automatically when a pod starts and handles:
+- Auto-detecting Python version (3.9, 3.10, 3.11)
+- Auto-detecting CUDA version and configuring environment
 - Installing system packages
 - Creating SSH keys for Git
-- Setting up Python virtual environment
-- Custom package installation
+- Setting up global Python virtual environment at `/opt/venv`
+- Installing packages from `/workspace/packages.txt` if present
 
-### Using the Included Setup Script
+#### CUDA Environment
 
-The repository includes a ready-to-use `setup.sh` that:
-- Updates apt cache (if >15 days old)
-- Installs common tools (vim, curl, wget, git, htop, tmux, less)
-- Installs packages from `/workspace/packages.txt` if present
-- Creates persistent SSH keys in `/workspace/ssh`
-- Configures Git to use workspace SSH keys
-- Creates global Python 3.11 virtual environment at `/opt/venv`
+The setup script automatically:
+- Detects installed CUDA version (11.x, 12.x, 13.x)
+- Finds PyTorch CUDA libraries for TensorFlow compatibility
+- Sets `LD_LIBRARY_PATH`, `CUDA_HOME`, and `PATH`
+- Persists environment variables in `.bashrc`
 
-### Configure Setup Script
+This ensures GPU libraries work correctly with TensorFlow, PyTorch, and other frameworks across different pod instances.
 
-During `./runpod-cli.py setup`, provide the path to your setup script:
+### Post-Setup Script (post-setup.sh)
 
-```bash
-Enter path to setup script (leave blank to skip): ./setup.sh
-```
+The post-setup script is **optional** and runs after the main setup completes. Use it for:
+- Reinstalling Python packages in project virtual environments
+- Cloning or updating Git repositories
+- Running project-specific initialization
+- Custom configurations
 
-### Install Setup Script to Pod
-
-After starting a pod, install your setup script:
+#### Example post-setup.sh
 
 ```bash
-./runpod-cli.py install setup.sh
-```
+#!/bin/bash
+# Post-Setup Script
+# Place at: /workspace/post-setup.sh
+# Make executable: chmod +x /workspace/post-setup.sh
 
-This copies it to `/workspace/setup.sh` where it will run on future pod starts.
+echo "Running post-setup..."
+
+# Reinstall packages for a specific project
+PROJECT_VENV="/workspace/projects/my-project/venv"
+PROJECT_REQUIREMENTS="/workspace/projects/my-project/requirements.txt"
+
+if [ -f "$PROJECT_REQUIREMENTS" ] && [ -d "$PROJECT_VENV" ]; then
+    echo "Reinstalling packages for my-project..."
+    /workspace/pip-install-cached.sh "$PROJECT_VENV" "$PROJECT_REQUIREMENTS"
+fi
+
+# Auto-reinstall all project venvs
+for project_dir in /workspace/projects/*/; do
+    if [ -f "$project_dir/requirements.txt" ]; then
+        venv_dir=$(find "$project_dir" -maxdepth 1 -type d -name "*venv*" | head -1)
+        if [ -n "$venv_dir" ]; then
+            echo "Reinstalling packages for: $(basename $project_dir)"
+            /workspace/pip-install-cached.sh "$venv_dir" "$project_dir/requirements.txt"
+        fi
+    fi
+done
+
+# Clone repositories if they don't exist
+if [ ! -d /workspace/projects/my-repo ]; then
+    echo "Cloning repository..."
+    git clone git@github.com:username/my-repo.git /workspace/projects/my-repo
+fi
+
+#!/bin/bash
+
+echo "Running post-setup..."
+
+# Reinstall packages from cache
+PROJECT_VENV="/workspace/projects/projects-venv-963e4f9286"
+PROJECT_REQUIREMENTS="/workspace/projects/2025-26b-fai2-adsai-AaronCiuffo245484/requirements.txt"
+
+if [ -f "$PROJECT_REQUIREMENTS" ] && [ -d "$PROJECT_VENV" ]; then
+    echo "Reinstalling packages..."
+    /workspace/pip-install-cached.sh "$PROJECT_VENV" "$PROJECT_REQUIREMENTS"
+fi
+
+# Reinstall editable packages
+source "$PROJECT_VENV/bin/activate"
+
+echo "Reinstalling editable packages..."
+pip install -e /workspace/projects/my-library-1
+pip install -e /workspace/projects/my-library-2
+# Add all your editable installs here
+
+
+echo "Post-setup complete!"
+```
 
 ### Custom Packages
 
@@ -193,6 +253,85 @@ build-essential
 ```
 
 The setup script will automatically install these packages when it runs.
+
+## Cached Package Installation
+
+### The Problem
+
+When you restart a pod (even with the same Docker image), you get assigned to a different physical host with potentially different CUDA drivers. This causes Python packages with compiled binaries (like TensorFlow) to break, requiring reinstallation.
+
+### The Solution: pip-install-cached.sh
+
+This script caches package wheels on your persistent volume and reinstalls them quickly on each pod start:
+
+```bash
+./pip-install-cached.sh <venv_path> <requirements_file> [cache_dir]
+```
+
+**Arguments:**
+- `venv_path` - Absolute path to virtual environment (e.g., `/workspace/projects/my-project/venv`)
+- `requirements_file` - Path to requirements.txt
+- `cache_dir` - Optional cache directory (default: `/workspace/pip-cache`)
+
+**Example:**
+```bash
+# First run: downloads packages to cache (~1-2 minutes for 32GB of packages)
+/workspace/pip-install-cached.sh \
+  /workspace/projects/ml-project/venv \
+  /workspace/projects/ml-project/requirements.txt
+
+# Subsequent runs: installs from cache (~30 seconds)
+```
+
+**How it works:**
+1. **First run**: Downloads all wheels to `/workspace/pip-cache`
+2. **Subsequent runs**: Installs from local cache (no network needed)
+3. **Ensures compatibility**: Packages are still compiled for the current host's CUDA/system libraries
+4. **Smart updating**: Automatically downloads missing packages if requirements change
+
+### Workflow with Cached Installation
+
+1. **Create your project structure:**
+```bash
+/workspace/
+├── pip-cache/              # Shared cache (auto-created)
+├── projects/
+│   ├── project-a/
+│   │   ├── venv/
+│   │   └── requirements.txt
+│   └── project-b/
+│       ├── venv/
+│       └── requirements.txt
+└── post-setup.sh          # Auto-reinstalls all venvs
+```
+
+2. **First time setup:**
+```bash
+# Create venv
+python3 -m venv /workspace/projects/my-project/venv
+
+# Install packages (creates cache)
+/workspace/pip-install-cached.sh \
+  /workspace/projects/my-project/venv \
+  /workspace/projects/my-project/requirements.txt
+```
+
+3. **Automatic reinstall on pod restart:**
+
+Add to your `/workspace/post-setup.sh`:
+```bash
+#!/bin/bash
+for project_dir in /workspace/projects/*/; do
+    if [ -f "$project_dir/requirements.txt" ]; then
+        venv_dir=$(find "$project_dir" -maxdepth 1 -type d -name "*venv*" | head -1)
+        if [ -n "$venv_dir" ]; then
+            /workspace/pip-install-cached.sh "$venv_dir" "$project_dir/requirements.txt"
+        fi
+    fi
+done
+```
+
+This automatically reinstalls all your project venvs on every pod start, ensuring GPU compatibility while staying fast (~30 seconds vs 10+ minutes).
 
 ## SSH Key Management
 
@@ -227,21 +366,32 @@ Network volumes provide persistent storage across pod restarts and terminations.
 ### Benefits
 - Data persists when pods are stopped/started
 - SSH keys, code, and data survive across sessions
-- Faster pod startup (no need to reinstall everything)
+- Package cache speeds up pod initialization
+- Faster pod startup (no need to re-download packages)
 
-### Volume Structure
+### Recommended Volume Structure
 
-Recommended structure for `/workspace`:
 ```
 /workspace/
-├── ssh/              # SSH keys (auto-created by setup script)
+├── ssh/                   # SSH keys (auto-created by setup.sh)
 │   ├── id_ed25519
 │   └── id_ed25519.pub
-├── packages.txt      # Additional apt packages to install
-├── setup.sh          # Setup script
-├── projects/         # Your code/projects
-├── datasets/         # Your datasets
-└── models/           # Trained models
+├── pip-cache/             # Cached Python packages (auto-created)
+├── packages.txt           # Additional apt packages to install
+├── setup.sh               # Main setup script
+├── post-setup.sh          # Custom post-setup script
+├── pip-install-cached.sh  # Package installation helper
+├── projects/              # Your code/projects
+│   ├── project-a/
+│   │   ├── venv/         # Project-specific venv
+│   │   ├── requirements.txt
+│   │   └── src/
+│   └── project-b/
+│       ├── venv/
+│       ├── requirements.txt
+│       └── notebooks/
+├── datasets/              # Your datasets
+└── models/                # Trained models
 ```
 
 ## Workflow Examples
@@ -254,15 +404,64 @@ Recommended structure for `/workspace`:
 
 # Connect and work
 ssh runpod
-cd /workspace/projects
-git clone git@github.com:username/repo.git
-cd repo
-source /opt/venv/bin/activate
+cd /workspace/projects/my-project
+source venv/bin/activate
 python train.py
 
 # When done, terminate
 exit
 ./runpod-cli.py down
+```
+
+### First Time Project Setup
+
+```bash
+# Start pod
+./runpod-cli.py up
+ssh runpod
+
+# Create project structure
+mkdir -p /workspace/projects/ml-project
+cd /workspace/projects/ml-project
+
+# Create venv
+python3 -m venv venv
+
+# Create requirements.txt
+cat > requirements.txt <<EOF
+tensorflow==2.13.0
+numpy
+pandas
+matplotlib
+jupyter
+EOF
+
+# Install with caching (first time is slower)
+/workspace/pip-install-cached.sh \
+  /workspace/projects/ml-project/venv \
+  /workspace/projects/ml-project/requirements.txt
+
+# Add to post-setup for auto-reinstall
+# (Edit /workspace/post-setup.sh as shown above)
+```
+
+### Subsequent Pod Restarts
+
+```bash
+# Terminate old pod
+./runpod-cli.py down
+
+# Start new pod (might be different host)
+./runpod-cli.py up
+
+# Packages auto-reinstall from cache via post-setup.sh
+# Takes ~30 seconds instead of 10+ minutes
+
+# Connect and continue working
+ssh runpod
+cd /workspace/projects/ml-project
+source venv/bin/activate
+python train.py  # GPU works correctly!
 ```
 
 ### Try Different GPU
@@ -285,7 +484,7 @@ exit
 ./runpod-cli.py down old-pod-name
 ```
 
-### Update Setup Script
+### Update Setup Scripts
 
 ```bash
 # Edit local setup script
@@ -338,6 +537,18 @@ GPU availability changes frequently. Try:
 ./runpod-cli.py up --gpu "different GPU type"
 ```
 
+### TensorFlow/PyTorch can't find GPU after pod restart
+
+This happens when packages were installed on a different host. Solution:
+```bash
+# Reinstall packages from cache
+ssh runpod
+cd /workspace/projects/your-project
+/workspace/pip-install-cached.sh $(pwd)/venv $(pwd)/requirements.txt
+
+# Or set up post-setup.sh to do this automatically
+```
+
 ### Volume not mounted at /workspace
 
 Terminate and restart the pod. The mount point is set at creation time:
@@ -359,18 +570,43 @@ ssh runpod "chmod 600 ~/.ssh/id_ed25519"
 2. Manually install: `./runpod-cli.py install setup.sh`
 3. Run manually: `ssh runpod "bash /workspace/setup.sh"`
 
-### Can't connect to other SSH hosts after using tool
+### Post-setup script not running
 
-The tool adds an `Include` directive to your `~/.ssh/config`. If you have connection issues, check that `~/.ssh/runpod.d/current.conf` contains a proper `Host runpod` block and not just bare `HostName`/`Port` directives.
+1. Check it exists and is executable:
+```bash
+ssh runpod "ls -la /workspace/post-setup.sh"
+```
+2. Make it executable:
+```bash
+ssh runpod "chmod +x /workspace/post-setup.sh"
+```
+3. Run manually:
+```bash
+ssh runpod "bash /workspace/post-setup.sh"
+```
+
+### Package cache taking too much space
+
+Check cache size and clean if needed:
+```bash
+ssh runpod "du -sh /workspace/pip-cache"
+
+# Remove old cached packages
+ssh runpod "rm -rf /workspace/pip-cache"
+# Cache will rebuild on next install
+```
 
 ## Tips
 
 - **Use network volumes** for any work you want to keep
 - **Check GPU prices** with `./runpod-cli.py gpus` before starting
+- **Use pip-install-cached.sh** for all package installations to save time on restarts
+- **Set up post-setup.sh** once to automate venv reinstallation
+- **Keep cache on volume** - one cache serves all your projects
 - **Customize setup.sh** for your specific workflow
 - **Use packages.txt** to install additional system packages
-- **Keep setup.sh in version control** and share with team
-- **The venv activates automatically** when you SSH in
+- **The global venv at /opt/venv activates automatically** when you SSH in
+- **Create project-specific venvs** in `/workspace/projects/*/` for isolation
 
 ## Advanced Usage
 
@@ -381,6 +617,8 @@ During setup, choose option 3 to enter a custom image:
 runpod/tensorflow:2.15.0-py3.11-cuda12.3.0-devel-ubuntu22.04
 ghcr.io/username/custom-image:latest
 ```
+
+**Note:** The setup script auto-detects Python and CUDA versions, so most images should work without modification.
 
 ### Multiple Configurations
 
@@ -393,6 +631,40 @@ cp ~/.runpod-config ~/.runpod-config-project-b
 cp ~/.runpod-config-project-a ~/.runpod-config
 ./runpod-cli.py up
 ```
+
+### Sharing Setup Across Team
+
+Keep your setup scripts in version control:
+```bash
+git add setup.sh post-setup.sh pip-install-cached.sh packages.txt
+git commit -m "Add RunPod setup automation"
+git push
+```
+
+Team members can clone and use the same setup:
+```bash
+./runpod-cli.py up
+ssh runpod
+git clone git@github.com:team/shared-setup.git /workspace/setup-scripts
+cp /workspace/setup-scripts/*.sh /workspace/
+```
+
+## Performance Notes
+
+### First Pod Start (Cold Start)
+- Setup script: ~2-3 minutes
+- Package installation: ~5-10 minutes (downloads + installs)
+- Total: ~7-13 minutes
+
+### Subsequent Pod Starts (Warm Start with Cache)
+- Setup script: ~2-3 minutes
+- Package installation from cache: ~30-60 seconds
+- Total: ~3-4 minutes
+
+### Time Savings
+- Without cache: 10+ minutes per restart
+- With cache: ~1 minute per restart
+- **Savings: ~90% faster** for package installation
 
 ## Support
 
